@@ -1,7 +1,7 @@
 /* map-tile-providers.js — Registry of map tile providers & runtime switcher (#1165/#1420).
  *
  * Scope:
- *   - Multiple providers: Carto (default), OSM, Stamen, Esri.
+ *   - Multiple providers: Carto (default), OSM, Stamen, Esri, Custom (self-hosted).
  *   - MC_setDarkTileProvider(id) / MC_setLightTileProvider(id) persist per-browser
  *     to localStorage and dispatch `mc-tile-provider-changed`.
  *   - Resolves localStorage → server default → 'carto-dark' / 'carto-light'.
@@ -41,6 +41,23 @@
     return 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
   };
 
+  var _getCustomUrl = function() { return (_cfg && _cfg.providers && _cfg.providers.custom && _cfg.providers.custom.url) || ''; };
+  // Custom provider is fully config-driven (label/attribution/maxZoom vary
+  // per operator), so it's built lazily in MC_initTileRegistry rather than
+  // as a fixed BASE_STYLES entry.
+  function _buildCustomStyle(dark) {
+    var c = (_cfg && _cfg.providers && _cfg.providers.custom) || {};
+    return {
+      provider: 'custom',
+      label: c.label || 'Custom Map',
+      url: _getCustomUrl,
+      invertFilter: dark ? INVERT_CSS : null,
+      type: dark ? 'dark' : 'light',
+      attribution: c.attribution || '',
+      maxZoom: c.maxZoom || 19
+    };
+  }
+
   var BASE_STYLES = {
     'carto-dark': { provider: 'carto', label: 'Carto Dark', url: function() { return _getCartoBase() + '/dark_all/{z}/{x}/{y}{r}.png'; }, invertFilter: null, type: 'dark', attribution: '© OpenStreetMap © CartoDB', maxZoom: 19 },
     'carto-light': { provider: 'carto', label: 'Carto Positron', url: function() { return _getCartoBase() + '/light_all/{z}/{x}/{y}{r}.png'; }, invertFilter: null, type: 'light', attribution: '© OpenStreetMap © CartoDB', maxZoom: 19 },
@@ -67,6 +84,7 @@
     var HAS_OSM = _cfg && _cfg.providers && _cfg.providers.osm && _cfg.providers.osm.enabled;
     var HAS_STAMEN = _cfg && _cfg.providers && _cfg.providers.stamen && _cfg.providers.stamen.enabled && !!_cfg.providers.stamen.token;
     var HAS_ESRI = true; // Kept for backwards compatibility
+    var HAS_CUSTOM = _cfg && _cfg.providers && _cfg.providers.custom && _cfg.providers.custom.enabled && !!_cfg.providers.custom.url;
 
     REGISTRY = {};
     for (var key in BASE_STYLES) {
@@ -75,6 +93,10 @@
       if (style.provider === 'osm' && HAS_OSM) REGISTRY[key] = style;
       if (style.provider === 'stamen' && HAS_STAMEN) REGISTRY[key] = style;
       if (style.provider === 'esri' && HAS_ESRI) REGISTRY[key] = style;
+    }
+    if (HAS_CUSTOM) {
+      REGISTRY['custom-light'] = _buildCustomStyle(false);
+      REGISTRY['custom-dark']  = _buildCustomStyle(true);
     }
 
     // Keep the public reference in sync with the newly rebuilt REGISTRY

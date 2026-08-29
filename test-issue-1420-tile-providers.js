@@ -171,6 +171,67 @@ test('Carto present when carto config is missing entirely (default on)', () => {
   for (const id of ALL_CARTO_IDS) assert.ok(reg[id], id + ' should exist when carto has no enabled flag');
 });
 
+test('Custom provider absent by default and when disabled or missing url', () => {
+  const ctx = makeSandbox();
+  loadProviders(ctx);
+  let reg = ctx.window.MC_TILE_PROVIDERS;
+  assert.ok(!reg['custom-light'] && !reg['custom-dark'], 'custom should be absent without config');
+
+  ctx.window.MC_MAP_CFG = { tiles: { providers: { custom: { enabled: false, url: 'https://x/{z}/{x}/{y}.png' } } } };
+  ctx.window.MC_initTileRegistry(false);
+  reg = ctx.window.MC_TILE_PROVIDERS;
+  assert.ok(!reg['custom-light'] && !reg['custom-dark'], 'custom should be absent when enabled=false');
+
+  ctx.window.MC_MAP_CFG = { tiles: { providers: { custom: { enabled: true, url: '' } } } };
+  ctx.window.MC_initTileRegistry(false);
+  reg = ctx.window.MC_TILE_PROVIDERS;
+  assert.ok(!reg['custom-light'] && !reg['custom-dark'], 'custom should be absent when url is empty');
+});
+
+test('Custom provider appears (light+dark) when enabled with a url, using configured label/attribution/maxZoom', () => {
+  const ctx = makeSandbox();
+  loadProviders(ctx);
+  ctx.window.MC_MAP_CFG = {
+    tiles: {
+      providers: {
+        custom: {
+          enabled: true,
+          url: 'https://map.example.org/styles/basic-preview/{z}/{x}/{y}.png',
+          label: 'My Map',
+          attribution: '© My Company',
+          maxZoom: 20
+        }
+      }
+    }
+  };
+  ctx.window.MC_initTileRegistry(false);
+  const reg = ctx.window.MC_TILE_PROVIDERS;
+  assert.ok(reg['custom-light'], 'custom-light should be present');
+  assert.ok(reg['custom-dark'], 'custom-dark should be present');
+  assert.strictEqual(reg['custom-light'].type, 'light');
+  assert.strictEqual(reg['custom-dark'].type, 'dark');
+  assert.strictEqual(reg['custom-light'].invertFilter, null, 'custom-light must not invert');
+  assert.ok(reg['custom-dark'].invertFilter && reg['custom-dark'].invertFilter.indexOf('invert(') >= 0, 'custom-dark must invert');
+  for (const id of ['custom-light', 'custom-dark']) {
+    assert.strictEqual(reg[id].label, 'My Map');
+    assert.strictEqual(reg[id].attribution, '© My Company');
+    assert.strictEqual(reg[id].maxZoom, 20);
+    const url = typeof reg[id].url === 'function' ? reg[id].url() : reg[id].url;
+    assert.strictEqual(url, 'https://map.example.org/styles/basic-preview/{z}/{x}/{y}.png');
+  }
+});
+
+test('Custom provider defaults label to "Custom Map" and attribution to "" when not configured', () => {
+  const ctx = makeSandbox();
+  loadProviders(ctx);
+  ctx.window.MC_MAP_CFG = { tiles: { providers: { custom: { enabled: true, url: 'https://x/{z}/{x}/{y}.png' } } } };
+  ctx.window.MC_initTileRegistry(false);
+  const reg = ctx.window.MC_TILE_PROVIDERS;
+  assert.strictEqual(reg['custom-light'].label, 'Custom Map');
+  assert.strictEqual(reg['custom-light'].attribution, '');
+  assert.strictEqual(reg['custom-light'].maxZoom, 19);
+});
+
 // ─── invertFilter ────────────────────────────────────────────────────────────
 
 test('Dark-inverted providers have non-null invertFilter; others have null', () => {

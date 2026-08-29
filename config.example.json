@@ -93,6 +93,14 @@
         "stamen": {
           "enabled": false,
           "token": ""
+        },
+        "_comment_custom": "Self-hosted / private tile server. 'url' is a Leaflet tile URL template ({z}/{x}/{y} required, {s}/{r} optional). Registers as 'custom-light' and 'custom-dark' (dark applies a CSS invert unless your tiles are already dark). Set map.tiles.darkDefault/lightDefault to those ids to make it the default, or pick it per-browser via the Theme Customizer.",
+        "custom": {
+          "enabled": false,
+          "url": "https://map.example.org/styles/basic-preview/{z}/{x}/{y}.png",
+          "label": "My Map",
+          "attribution": "© My Company",
+          "maxZoom": 19
         }
       }
     }
