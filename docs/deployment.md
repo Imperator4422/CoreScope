@@ -1,68 +1,190 @@
-# CoreScope Deployment Guide
+# Deploying CoreScope
 
-Comprehensive guide to deploying and operating CoreScope. For a quick start, see [DEPLOY.md](../DEPLOY.md).
+Get CoreScope running with automatic HTTPS on your own server.
 
 ## Table of Contents
 
-- [System Requirements](#system-requirements)
-- [Docker Deployment](#docker-deployment)
-- [Configuration Reference](#configuration-reference)
-- [MQTT Setup](#mqtt-setup)
-- [TLS / HTTPS](#tls--https)
-- [Behind a CDN (Cloudflare, Fastly)](#behind-a-cdn-cloudflare-fastly)
-- [Monitoring & Health Checks](#monitoring--health-checks)
-- [Backup & Restore](#backup--restore)
+- [What You'll End Up With](#what-youll-end-up-with)
+- [What You Need Before Starting](#what-you-need-before-starting)
+- [Installing Docker](#installing-docker)
+- [Quick Start](#quick-start)
+- [Connecting an Observer](#connecting-an-observer)
+- [HTTPS Options](#https-options)
+- [MQTT Security](#mqtt-security)
+- [Database Backups](#database-backups)
+- [Updating](#updating)
+- [Customization](#customization)
 - [Troubleshooting](#troubleshooting)
+- [Architecture Overview](#architecture-overview)
 
----
+## What You'll End Up With
 
-## System Requirements
+- CoreScope running at `https://your-domain.com`
+- Automatic HTTPS certificates (via Let's Encrypt + Caddy)
+- Built-in MQTT broker for receiving packets from observers
+- SQLite database for packet storage (auto-created)
+- Everything in a single Docker container
 
-| Resource | Minimum | Recommended |
-|----------|---------|-------------|
-| RAM | 256 MB | 512 MB+ |
-| Disk | 500 MB (image + DB) | 2 GB+ for long-term data |
-| CPU | 1 core | 2+ cores |
-| Architecture | `linux/amd64`, `linux/arm64` | — |
-| Docker | 20.10+ | Latest stable |
+## What You Need Before Starting
 
-CoreScope runs well on Raspberry Pi 4/5 (ARM64). The Go server uses ~300 MB RAM for 56K+ packets.
+### A server
+A computer that's always on and connected to the internet:
+- **Cloud VM** — DigitalOcean, Linode, Vultr, AWS, Azure, etc. A $5-6/month VPS works. Pick **Ubuntu 22.04 or 24.04**.
+- **Raspberry Pi** — Works, just slower to build.
+- **Home PC/laptop** — Works if your ISP doesn't block ports 80/443 (many residential ISPs do).
 
----
+You'll need **SSH access** to your server. Cloud providers give you instructions when you create the VM.
 
-## Docker Deployment
+### A domain name
+A domain (like `analyzer.example.com`) pointed at your server's IP:
+- Buy one (~$10/year) from Namecheap, Cloudflare, etc.
+- Or use a free subdomain from [DuckDNS](https://www.duckdns.org/) or [FreeDNS](https://freedns.afraid.org/)
 
-### Quick Start (one command)
+After getting a domain, create an **A record** pointing to your server's IP address. Your domain provider's dashboard will have a "DNS" section for this.
 
+**Important:** DNS must be configured and propagated *before* you start the container. Caddy will try to provision certificates on startup and fail if the domain doesn't resolve. Verify with `dig analyzer.example.com` — it should show your server's IP.
+
+### Open ports
+Your server's firewall must allow:
+- **Port 80** — needed for HTTPS certificate provisioning (Let's Encrypt ACME challenge)
+- **Port 443** — HTTPS traffic
+
+Cloud providers: find "Security Groups" or "Firewall" in the dashboard, add inbound rules for TCP 80 and 443 from 0.0.0.0/0.
+
+Ubuntu firewall:
 ```bash
-docker run -d --name corescope \
-  -p 80:80 \
-  -v corescope-data:/app/data \
-  ghcr.io/kpa-clawbot/corescope:latest
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
 ```
 
-Open `http://localhost` — you'll see an empty dashboard ready to receive packets.
+## Installing Docker
 
-No `config.json` is required. The server starts with sensible defaults:
-- HTTP on port 3000 (Caddy proxies port 80 → 3000 internally)
-- Internal Mosquitto MQTT broker on port 1883
-- Ingestor connects to `mqtt://localhost:1883` automatically
-- SQLite database at `/app/data/meshcore.db`
+Docker packages an app and all its dependencies into a container — an isolated environment with everything it needs to run. You don't install Node.js, Mosquitto, or Caddy separately; they're all included in the container.
 
-### Full `docker run` Reference (recommended)
-
-The bare `docker run` command is the primary deployment method. One image, documented parameters — run it however you want.
+SSH into your server and run:
 
 ```bash
-docker run -d --name corescope \
-  --restart=unless-stopped \
-  -p 80:80 -p 443:443 -p 1883:1883 \
-  -e DISABLE_MOSQUITTO=false \
-  -e DISABLE_CADDY=false \
-  -v /your/data:/app/data \
-  -v /your/Caddyfile:/etc/caddy/Caddyfile:ro \
-  -v /your/caddy-data:/data/caddy \
-  ghcr.io/kpa-clawbot/corescope:latest
+# Install Docker
+curl -fsSL https://get.docker.com | sh
+
+# Allow your user to run Docker without sudo
+sudo usermod -aG docker $USER
+```
+
+**Log out and SSH back in** (the group change needs a new session), then verify:
+
+```bash
+docker --version
+# Should print: Docker version 24.x.x or newer
+```
+
+## Quick Start
+
+The easiest way — use the management script:
+
+```bash
+git clone https://github.com/Kpa-clawbot/corescope.git
+cd corescope
+./manage.sh setup
+```
+
+It walks you through everything: checks Docker, creates config, asks for your domain, checks DNS, builds, and starts.
+
+After setup, manage with:
+```bash
+./manage.sh status       # Check if everything's running
+./manage.sh logs         # View logs
+./manage.sh backup       # Backup the database
+./manage.sh update       # Pull latest + rebuild + restart
+./manage.sh mqtt-test    # Check if MQTT data is flowing
+./manage.sh help         # All commands
+```
+
+### Manual setup
+
+```mermaid
+flowchart LR
+    A[Clone repo] --> B[Create config] --> C[Create Caddyfile] --> D[Build & run] --> E[Open site]
+    style E fill:#22c55e,color:#000
+```
+
+### 1. Download the code
+
+```bash
+git clone https://github.com/Kpa-clawbot/corescope.git
+cd corescope
+```
+
+### 2. Create your config
+
+```bash
+cp config.example.json config.json
+nano config.json
+```
+
+Change the `apiKey` to any random string. The rest of the defaults work out of the box.
+
+```jsonc
+{
+  "apiKey": "change-me-to-something-random",
+  ...
+}
+```
+
+Save: `Ctrl+O`, `Enter`, `Ctrl+X`.
+
+### 3. Set up your domain for HTTPS
+
+```bash
+mkdir -p caddy-config
+nano caddy-config/Caddyfile
+```
+
+Enter your domain (replace `analyzer.example.com` with yours):
+
+```
+analyzer.example.com {
+    reverse_proxy localhost:3000
+}
+```
+
+Save and close. Caddy handles certificates, renewals, and HTTP→HTTPS redirects automatically.
+
+### 4. Build and run
+
+```bash
+docker build -t corescope .
+
+docker run -d \
+  --name corescope \
+  --restart unless-stopped \
+  -p 80:80 \
+  -p 443:443 \
+  -v $(pwd)/config.json:/app/config.json:ro \
+  -v $(pwd)/caddy-config/Caddyfile:/etc/caddy/Caddyfile:ro \
+  -v meshcore-data:/app/data \
+  -v caddy-data:/data/caddy \
+  corescope
+```
+
+What each flag does:
+| Flag | Purpose |
+|------|---------|
+| `-d` | Run in background |
+| `--restart unless-stopped` | Auto-restart on crash or reboot |
+| `-p 80:80 -p 443:443` | Expose web ports |
+| `-v .../config.json:...ro` | Your config (read-only) |
+| `-v .../Caddyfile:...` | Your domain config |
+| `-v meshcore-data:/app/data` | Database storage (persists across restarts) |
+| `-v caddy-data:/data/caddy` | HTTPS certificate storage |
+
+### 5. Verify
+
+Open `https://your-domain.com`. You should see the analyzer home page.
+
+Check the logs:
+```bash
+docker logs corescope
 ```
 
 #### Parameters
@@ -92,7 +214,7 @@ DISABLE_CADDY=true
 MQTT_BROKER=mqtt://my-broker:1883
 ```
 
-The entrypoint sources this file before starting services. This works with any launch method (`docker run`, compose, or manage.sh).
+The container runs its own MQTT broker (Mosquitto) internally — that `localhost:1883` connection is inside the container, not exposed to the internet.
 
 Two exceptions, both because the entrypoint runs this file as root from a
 directory the Go services can write once they run unprivileged:
@@ -109,53 +231,60 @@ directory the Go services can write once they run unprivileged:
 
 ### Docker Compose (legacy alternative)
 
-Docker Compose files are maintained for backward compatibility but are no longer the recommended approach.
+The analyzer receives packets from observers via MQTT.
 
-```bash
-curl -sL https://raw.githubusercontent.com/Kpa-clawbot/CoreScope/master/docker-compose.example.yml \
-  -o docker-compose.yml
-docker compose up -d
+### Option A: Use a public broker
+
+Add a remote broker to `mqttSources` in your `config.json`:
+
+```json
+{
+  "name": "public-broker",
+  "broker": "mqtts://mqtt.lincomatic.com:8883",
+  "username": "your-username",
+  "password": "your-password",
+  "rejectUnauthorized": false,
+  "topics": ["meshcore/SJC/#", "meshcore/SFO/#"]
+}
 ```
 
-#### Compose environment variables
+Restart: `docker restart corescope`
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `HTTP_PORT` | `80` | Host port for the web UI |
-| `DATA_DIR` | `./data` | Host path for persistent data |
-| `DISABLE_MOSQUITTO` | `false` | Set `true` to use an external MQTT broker |
-| `DISABLE_CADDY` | `false` | Set `true` to skip the built-in Caddy proxy |
+### Option B: Run your own observer
 
-### manage.sh (legacy alternative)
+You need a MeshCore repeater connected via USB or BLE to a computer running [meshcoretomqtt](https://github.com/Cisien/meshcoretomqtt). Point it at your analyzer's MQTT broker.
 
-The `manage.sh` wrapper script provides a setup wizard and convenience commands. It uses Docker Compose internally. See [DEPLOY.md](../DEPLOY.md) for usage. New deployments should prefer bare `docker run`.
+⚠️ If your observer is remote (not on the same machine), you'll need to expose port 1883. **Read the MQTT Security section first.**
 
-### Image tags
+## HTTPS Options
 
-| Tag | Use case |
-|-----|----------|
-| `v3.4.1` | Pinned release — recommended for production |
-| `v3.4` | Latest patch in the v3.4.x series |
-| `v3` | Latest minor+patch in v3.x |
-| `latest` | Latest release tag |
-| `edge` | Built from master on every push — unstable |
+### Automatic (recommended) — Caddy + Let's Encrypt
 
-### Updating
+This is what the Quick Start sets up. Caddy handles everything. Requirements:
+- Domain pointed at your server
+- Ports 80 + 443 open
+- No other web server (Apache, nginx) running on those ports
 
-```bash
-docker compose pull
-docker compose up -d
+### Bring your own certificate
+
+If you already have a certificate (from Cloudflare, your organization, etc.), tell Caddy to use it instead of Let's Encrypt:
+
+```
+analyzer.example.com {
+    tls /path/to/cert.pem /path/to/key.pem
+    reverse_proxy localhost:3000
+}
 ```
 
-For `docker run` users:
-
+Mount the cert files into the container:
 ```bash
-docker pull ghcr.io/kpa-clawbot/corescope:latest
-docker stop corescope && docker rm corescope
-docker run -d --name corescope ... # same flags as before
+docker run ... \
+  -v /path/to/cert.pem:/certs/cert.pem:ro \
+  -v /path/to/key.pem:/certs/key.pem:ro \
+  ...
 ```
 
-Data is preserved in the volume — updates are non-destructive.
+And update the Caddyfile paths to `/certs/cert.pem` and `/certs/key.pem`.
 
 ### Running the Go services unprivileged
 
@@ -237,49 +366,51 @@ covered by `docker/test-select-service-user.sh`.
 
 ---
 
-## Configuration Reference
+If you can't open ports 80/443 (residential ISP, restrictive firewall), use a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/). It creates an outbound connection from your server to Cloudflare — no inbound ports needed. Your Caddyfile becomes:
 
-CoreScope uses a layered configuration system (highest priority wins):
-
-1. **Environment variables** — `MQTT_BROKER`, `DB_PATH`, etc.
-2. **`/app/data/config.json`** — full config file (volume-mounted)
-3. **Built-in defaults** — work out of the box with no config
-
-### Environment variable overrides
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MQTT_BROKER` | `mqtt://localhost:1883` | MQTT broker URL (overrides config file) |
-| `MQTT_TOPIC` | `meshcore/#` | MQTT topic subscription pattern |
-| `DB_PATH` | `data/meshcore.db` | SQLite database path |
-| `DISABLE_MOSQUITTO` | `false` | Skip the internal Mosquitto broker |
-| `DISABLE_CADDY` | `false` | Skip the built-in Caddy reverse proxy |
-
-### config.json
-
-For advanced configuration, create a `config.json` and mount it at `/app/data/config.json`:
-
-```bash
-docker run -d --name corescope \
-  -p 80:80 \
-  -v corescope-data:/app/data \
-  -v ./config.json:/app/data/config.json:ro \
-  ghcr.io/kpa-clawbot/corescope:latest
+```
+:80 {
+    reverse_proxy localhost:3000
+}
 ```
 
-See `config.example.json` in the repository for all available options including:
-- MQTT sources (multiple brokers)
-- Channel encryption keys
-- Branding and theming
-- Health thresholds
-- Region filters
-- Retention policies
-- Geo-filtering
-- Map tile providers (OSM, Stamen, Carto, etc.)
+And Cloudflare handles HTTPS at the edge.
 
-### Map Tile Providers
+### Behind an existing reverse proxy (nginx, Traefik, etc.)
 
-Map tile providers are enabled and configured via the `config.json` file. You can provide your custom API credentials (e.g. `osm_url`, `stamen_api_key`, `mapbox_api_key`) to activate external tile services. Once configured on the server, users can select their preferred tile provider from the Customizer UI on the client, and their choice will be persisted automatically.
+If you already run a reverse proxy, skip Caddy entirely and proxy directly to the Node.js port:
+
+```bash
+docker run -d \
+  --name corescope \
+  --restart unless-stopped \
+  -p 3000:3000 \
+  -v $(pwd)/config.json:/app/config.json:ro \
+  -v meshcore-data:/app/data \
+  corescope
+```
+
+Then configure your existing proxy to forward traffic to `localhost:3000`.
+
+### HTTP only (development / local network)
+
+For local testing or a LAN-only setup, use the default Caddyfile that ships in the image (serves on port 80, no HTTPS):
+
+```bash
+docker run -d \
+  --name corescope \
+  --restart unless-stopped \
+  -p 80:80 \
+  -v $(pwd)/config.json:/app/config.json:ro \
+  -v meshcore-data:/app/data \
+  corescope
+```
+
+## MQTT Security
+
+The container runs Mosquitto on port 1883 with **anonymous access by default**. This is safe as long as the port isn't exposed outside the container.
+
+The Quick Start docker run command above does **not** expose port 1883. Only add `-p 1883:1883` if you need remote observers to connect directly.
 
 #### CARTO now requires an API key
 
@@ -321,54 +452,68 @@ Notes:
 
 ---
 
-## MQTT Setup
-
-CoreScope receives MeshCore packets via MQTT. The container ships with an internal Mosquitto broker — no setup needed for basic use.
-
-### Internal broker (default)
-
-The built-in Mosquitto broker listens on port 1883 inside the container. Point your MeshCore gateways at it:
-
+**Option 1: Firewall** — Only allow specific IPs:
 ```bash
-# Expose MQTT port for external gateways
-docker run -d --name corescope \
-  -p 80:80 -p 1883:1883 \
-  -v corescope-data:/app/data \
-  ghcr.io/kpa-clawbot/corescope:latest
+sudo ufw allow from 203.0.113.10 to any port 1883   # Your observer's IP
 ```
 
-### External broker
+**Option 2: Add authentication** — Edit `docker/mosquitto.conf` before building:
+```
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+```
+After starting the container, create users:
+```bash
+docker exec -it corescope mosquitto_passwd -c /etc/mosquitto/passwd myuser
+```
 
-To use your own MQTT broker (Mosquitto, EMQX, HiveMQ, etc.):
+**Option 3: Use TLS** — For production, configure Mosquitto with TLS certificates. See the [Mosquitto docs](https://mosquitto.org/man/mosquitto-conf-5.html).
 
-1. Disable the internal broker:
-   ```bash
-   -e DISABLE_MOSQUITTO=true
-   ```
+### Recommended approach for remote observers
 
-2. Point the ingestor at your broker:
-   ```bash
-   -e MQTT_BROKER=mqtt://your-broker:1883
-   ```
+Don't expose 1883 at all. Instead, have your observers publish to a shared public MQTT broker (like lincomatic's), and configure your analyzer to subscribe to that broker in `mqttSources`. The analyzer makes an outbound connection — no inbound ports needed.
 
-   Or via `config.json`:
-   ```json
-   {
-     "mqttSources": [
-       {
-         "name": "my-broker",
-         "broker": "mqtt://your-broker:1883",
-         "username": "user",
-         "password": "pass",
-         "topics": ["meshcore/#"]
-       }
-     ]
-   }
-   ```
+## Database Backups
 
-### Multiple brokers
+Packet data is stored in `meshcore.db` inside the data volume.
 
-CoreScope can connect to multiple MQTT brokers simultaneously:
+**Using manage.sh (easiest):**
+
+```bash
+./manage.sh backup                          # Saves to ./backups/corescope-TIMESTAMP/
+./manage.sh backup ~/my-backup.db           # Custom path
+./manage.sh restore ./backups/some-file.db  # Restore (backs up current DB first)
+```
+
+**Local directory mount (recommended):**
+
+If you used `-v ./analyzer-data:/app/data` instead of a Docker volume, the database is just `./analyzer-data/meshcore.db` — back it up however you like.
+
+**Automated daily backup (cron):**
+
+```bash
+crontab -e
+# Add:
+0 3 * * * cd /path/to/corescope && ./manage.sh backup
+```
+
+## Updating
+
+```bash
+./manage.sh update
+```
+
+Pulls latest code, rebuilds the image, restarts the container. Data is preserved.
+
+Data is preserved in the Docker volumes.
+
+**Tip:** Save your `docker run` command in a script (`run.sh`) so you don't have to remember all the flags.
+
+## Customization
+
+### Branding
+
+In `config.json`:
 
 ```json
 {
@@ -762,17 +907,97 @@ The in-memory packet store grows with retained packets. Configure retention limi
 
 ### Database locked errors
 
-SQLite doesn't support concurrent writers well. Ensure only one CoreScope instance accesses the database file. If running multiple containers, each needs its own database.
+Create a `theme.json` in your data directory to customize colors. See [CUSTOMIZATION.md](./CUSTOMIZATION.md) for all options.
 
-### Container unhealthy
+### Map defaults
 
-Check logs: `docker compose logs --tail 50`. Common causes:
-- Port 3000 already in use inside the container
-- Database file permissions (must be writable by the container user)
-- Corrupted database — restore from backup
+Center the map on your area in `config.json`:
 
-### ARM / Raspberry Pi issues
+```json
+{
+  "mapDefaults": {
+    "center": [37.45, -122.0],
+    "zoom": 9
+  }
+}
+```
 
-- Use `linux/arm64` images (Pi 4 and 5). Pi 3 (armv7) is not supported.
-- First pull may be slow — the multi-arch manifest selects the right image automatically.
-- If memory is tight, set `packetStore.maxMemoryMB` to limit RAM usage.
+## Troubleshooting
+
+| Problem | Likely cause | Fix |
+|---------|-------------|-----|
+| Site shows "connection refused" | Container not running | `docker ps` to check, `docker logs corescope` for errors |
+| HTTPS not working | Port 80 blocked | Open port 80 — Caddy needs it for ACME challenges |
+| "too many certificates" error | Let's Encrypt rate limit (5/domain/week) | Use a different subdomain, bring your own cert, or wait a week |
+| Certificate won't provision | DNS not pointed at server | `dig your-domain` must show your server IP before starting |
+| No packets appearing | No observer connected | `docker exec corescope mosquitto_sub -t 'meshcore/#' -C 1 -W 10` — if silent, no data is coming in |
+| Container crashes on startup | Bad JSON in config | `python3 -c "import json; json.load(open('config.json'))"` to validate |
+| "address already in use" | Another web server on 80/443 | Stop it: `sudo systemctl stop nginx apache2` |
+| Slow on Raspberry Pi | First build is slow | Normal — subsequent builds use cache. Runtime performance is fine. |
+
+## Architecture Overview
+
+### Traffic flow
+
+```mermaid
+flowchart LR
+    subgraph Internet
+        U[Browser] -->|HTTPS :443| C
+        O1[Observer 1] -->|MQTT :1883| M
+        O2[Observer 2] -->|MQTT :1883| M
+        LE[Let's Encrypt] -->|HTTP :80| C
+    end
+
+    subgraph Docker Container
+        C[Caddy] -->|proxy :3000| N[Node.js]
+        M[Mosquitto] --> N
+        N --> DB[(SQLite)]
+        N -->|WebSocket| U
+    end
+
+    style C fill:#22c55e,color:#000
+    style M fill:#3b82f6,color:#fff
+    style N fill:#f59e0b,color:#000
+    style DB fill:#8b5cf6,color:#fff
+```
+
+### Container internals
+
+```mermaid
+flowchart TD
+    S[supervisord] --> C[Caddy]
+    S --> M[Mosquitto]
+    S --> N[Node.js server]
+
+    C -->|reverse proxy + auto HTTPS| N
+    M -->|MQTT messages| N
+
+    N --> API[REST API]
+    N --> WS[WebSocket — live feed]
+    N --> MQTT[MQTT client — ingests packets]
+    N --> DB[(SQLite — data/meshcore.db)]
+
+    style S fill:#475569,color:#fff
+    style C fill:#22c55e,color:#000
+    style M fill:#3b82f6,color:#fff
+    style N fill:#f59e0b,color:#000
+```
+
+### Data flow
+
+```mermaid
+sequenceDiagram
+    participant R as LoRa Repeater
+    participant O as Observer
+    participant M as Mosquitto
+    participant N as Node.js
+    participant B as Browser
+
+    R->>O: Radio packet (915 MHz)
+    O->>M: MQTT publish (raw hex + SNR + RSSI)
+    M->>N: Subscribe callback
+    N->>N: Decode, store in SQLite + memory
+    N->>B: WebSocket broadcast
+    B->>N: REST API requests
+    N->>B: JSON responses
+```
