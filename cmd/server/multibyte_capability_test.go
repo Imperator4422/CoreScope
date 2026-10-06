@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 // recentTS returns a timestamp string N hours ago, ensuring test data
@@ -20,7 +20,7 @@ func recentTS(hoursAgo int) string {
 // setupCapabilityTestDB creates a minimal in-memory DB with nodes table.
 func setupCapabilityTestDB(t *testing.T) *DB {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:")
+	conn, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func addTestPacket(store *PacketStore, tx *StoreTx) {
 // buildPathByte returns a 2-char hex string for the path byte with given
 // hashSize (1-3) and hopCount.
 func buildPathByte(hashSize, hopCount int) string {
-	b := byte(((hashSize - 1) & 0x3) << 6) | byte(hopCount&0x3F)
+	b := byte(((hashSize-1)&0x3)<<6) | byte(hopCount&0x3F)
 	return fmt.Sprintf("%02x", b)
 }
 
@@ -446,7 +446,7 @@ func TestMultiByteCapability_AdopterEvidenceTakesPrecedence(t *testing.T) {
 // setupPersistTestDB creates an in-memory DB with multibyte_sup/multibyte_evidence columns.
 func setupPersistTestDB(t *testing.T) *DB {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:")
+	conn, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}

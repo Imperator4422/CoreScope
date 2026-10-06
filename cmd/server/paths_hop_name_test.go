@@ -25,7 +25,7 @@ func TestHandleNodePaths_HopName_CanonicalPathShowsTarget_1144(t *testing.T) {
 	recent := time.Now().Add(-1 * time.Hour).Format(time.RFC3339)
 	recentEpoch := time.Now().Add(-1 * time.Hour).Unix()
 
-	targetPK := "37cf0832aaaabbbb" // no GPS
+	targetPK := "37cf0832aaaabbbb"  // no GPS
 	siblingPK := "37bb000011112222" // has GPS — biased resolver picks this without fix
 
 	mustExec(t, db, `INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen, advert_count)
@@ -44,6 +44,9 @@ func TestHandleNodePaths_HopName_CanonicalPathShowsTarget_1144(t *testing.T) {
 	store := NewPacketStore(db, nil)
 	if err := store.Load(); err != nil {
 		t.Fatalf("store.Load: %v", err)
+	}
+	if !store.WaitIndexesReady(5 * time.Second) {
+		t.Fatal("background indexes not ready within 5s")
 	}
 	srv.store = store
 	router := mux.NewRouter()

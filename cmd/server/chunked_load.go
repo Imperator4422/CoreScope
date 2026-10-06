@@ -96,7 +96,33 @@ func (s *PacketStore) OnChunkLoaded(fn func(rowsThisChunk, totalRows int)) {
 func (s *PacketStore) chunkedLoadInit() {
 	s.chunkInitOnce.Do(func() {
 		s.firstChunkReady = make(chan struct{})
+		s.startupLoadDone = make(chan struct{})
 	})
+}
+
+// StartupLoadDone returns a channel closed once RunStartupLoad has
+// returned: LoadChunked AND the background fill loader are finished,
+// whether they succeeded or not. Nothing more is loaded from SQLite
+// after it closes. LoadComplete() is not a substitute: it flips at the
+// end of the hot window, before the background fill starts.
+func (s *PacketStore) StartupLoadDone() <-chan struct{} {
+	s.chunkedLoadInit()
+	return s.startupLoadDone
+}
+
+func (s *PacketStore) signalStartupLoadDone() {
+	s.chunkedLoadInit()
+	if !s.startupLoadSignaled.CompareAndSwap(false, true) {
+		return
+	}
+	// The analytics recomputes this signal triggers read these TTL
+	// caches. Drop what was computed from the partial store so they see
+	// the loaded data now rather than after the TTL.
+	s.hashSizeInfoMu.Lock()
+	s.hashSizeInfoCache = nil
+	s.hashSizeInfoMu.Unlock()
+	s.clockSkew.Invalidate()
+	close(s.startupLoadDone)
 }
 
 func (s *PacketStore) signalFirstChunk() {
@@ -153,6 +179,7 @@ func (s *PacketStore) fireChunkCallbacks(rowsThisChunk, totalRows int) {
 // LoadChunked.
 //
 // Steady-state contracts post-return:
+//   - StartupLoadDone() is closed, on every path below.
 //   - LoadChunked error: backgroundLoadFailed=true, backgroundLoadDone
 //     is also set true (terminal observable state — see dij #1).
 //     backgroundLoadErr non-empty. Returns the error.
@@ -172,6 +199,7 @@ func (s *PacketStore) fireChunkCallbacks(rowsThisChunk, totalRows int) {
 // parallelism while ensuring oldestLoaded has a valid floor when the
 // bg loader starts.
 func (s *PacketStore) RunStartupLoad(chunkSize int) error {
+	defer s.signalStartupLoadDone()
 	// Clear any stale error from a previous invocation (single-call
 	// invariant — see godoc above). Production never re-enters but
 	// test fixtures may construct fresh stores that share no state;
@@ -405,13 +433,18 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 				ORDER BY t.id ASC, o.timestamp DESC`
 		}
 
+		// Acquire before opening the cursor: a feed waiting for the same
+		// connection must never hold this gate while we hold its cursor.
+		s.advertEvidenceMu.Lock()
 		rows, err := s.db.conn.Query(chunkSQL)
 		if err != nil {
+			s.advertEvidenceMu.Unlock()
 			return fmt.Errorf("chunk %d: query: %w", chunkIdx, err)
 		}
 
 		chunkTxCount, lastID, err := s.scanAndMergeChunk(rows, relayPM, &coldLoadAmbiguousHopsSkipped)
 		rows.Close()
+		s.advertEvidenceMu.Unlock()
 		if err != nil {
 			return fmt.Errorf("chunk %d: scan: %w", chunkIdx, err)
 		}
@@ -440,6 +473,7 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 	s.mu.Lock()
 	for _, tx := range s.packets {
 		pickBestObservation(tx)
+		s.trackedBytes += rechargeTx(tx)
 		s.indexByNode(tx)
 	}
 	// Restore the "s.packets sorted oldest-first by FirstSeen" invariant
@@ -548,7 +582,7 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 				RouteType:   nullIntPtr(routeType),
 				PayloadType: nullIntPtr(payloadType),
 				DecodedJSON: nullStrVal(decodedJSON),
-				ScopeName:   nullStrVal(scopeName),
+				ScopeName:   nullStrPtr(scopeName),
 				obsKeys:     make(map[string]bool),
 				observerSet: make(map[string]bool),
 			}
@@ -564,7 +598,7 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 				s.byPayloadType[pt] = append(s.byPayloadType[pt], tx)
 			}
 			s.trackAdvertPubkey(tx)
-			s.trackedBytes += estimateStoreTxBytes(tx)
+			s.trackedBytes += rechargeTx(tx)
 		}
 
 		if obsID.Valid {
@@ -588,10 +622,9 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 				RSSI:           nullFloatPtr(rssi),
 				Score:          nullIntPtr(score),
 				PathJSON:       obsPJ,
-				// obs.RawHex deliberately NOT stored: it duplicates the parent
-				// tx.RawHex (same content hash ⇒ same frame) and enrichObs falls
-				// back to tx.RawHex when obs.RawHex == "". obsRawHex is still
-				// scanned to keep scanArgs aligned with the o.raw_hex column.
+				// Raw frames stay in SQLite; hash equality does not imply route
+				// equality. Only compact advert evidence is retained per tx.
+				// Packet-detail queries can read the original observation raw.
 				Timestamp: normalizeTimestamp(nullStrVal(obsTimestamp)),
 			}
 
@@ -641,6 +674,19 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 	if err := rows.Err(); err != nil {
 		return len(seenTxIDs), maxID, err
 	}
+	rows.Close()
+	txs := make([]*StoreTx, 0, len(seenTxIDs))
+	for id := range seenTxIDs {
+		txs = append(txs, s.byTxID[id])
+	}
+	ids := advertTxIDs(txs)
+	s.mu.Unlock()
+	masks, err := s.db.advertEvidenceForIDs(ids)
+	s.mu.Lock()
+	if err != nil {
+		return len(seenTxIDs), maxID, err
+	}
+	s.mergeAdvertEvidence(masks)
 	return len(seenTxIDs), maxID, nil
 }
 

@@ -301,7 +301,45 @@ The container runs Mosquitto on port 1883 with **anonymous access by default**. 
 
 The Quick Start docker run command above does **not** expose port 1883. Only add `-p 1883:1883` if you need remote observers to connect directly.
 
-### If you need to expose MQTT
+#### CARTO now requires an API key
+
+CARTO's raster basemaps (`carto-dark`, `carto-light`, `carto-voyager`,
+`carto-voyager-dark`, `positron-dark`) require an API key. Without one, tiles
+are still returned with a **200 status** but every one of them is stamped
+`API KEY REQUIRED` — so nothing errors, no healthcheck fires, and the map just
+quietly looks broken.
+
+Get a free key at <https://carto.com/basemaps/apikey> — no CARTO account, no
+credit card, emailed back immediately, 5 million tile requests per calendar
+month across raster and vector. Then set it as `key`:
+
+```json
+"map": {
+  "tiles": {
+    "providers": {
+      "carto": { "enabled": true, "key": "YOUR_CARTO_KEY" }
+    }
+  }
+}
+```
+
+Notes:
+
+- The query parameter is `key`. **`api_key` is silently ignored** and still
+  serves the watermarked tile.
+- The key is sent to the browser, so treat it as public. CARTO asks for a domain
+  when the key is issued, but whether that restriction is enforced on every
+  request has not been verified here. Assume anyone can read the key from
+  devtools and spend your quota. The 5M/month fair-use ceiling makes that
+  low-impact for most deployments, but it is worth knowing.
+- A wrong or expired key fails the same silent way as no key at all. Verify by
+  **looking at a tile**, not by checking for a 200.
+- CARTO has said it is considering freezing data updates to the raster
+  basemaps. If you would rather not depend on them, set
+  `"carto": { "enabled": false }` and use another provider — `esri` needs no
+  key at all, and `osm`/`stamen` accept their own tokens.
+
+---
 
 **Option 1: Firewall** — Only allow specific IPs:
 ```bash
@@ -377,7 +415,9 @@ In `config.json`:
 }
 ```
 
-### Themes
+`packetStore.maxMemoryMB` bounds the store **and the caches that belong to it** — the decoded-packet cache and per-packet index entries, not just the stored rows. It is enforced in two places: the startup load stops at the budget, and the store evicts oldest-first when it exceeds it. Leaving it unset means no limit. Actual usage is on `/api/perf` as `packetStore.trackedMB`, next to `maxMB`.
+
+### Database locked errors
 
 Create a `theme.json` in your data directory to customize colors. See [CUSTOMIZATION.md](./CUSTOMIZATION.md) for all options.
 

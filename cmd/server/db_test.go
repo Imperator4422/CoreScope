@@ -1,19 +1,23 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 // setupTestDB creates an in-memory SQLite database with the v3 schema.
-func setupTestDB(t *testing.T) *DB {
+func setupTestDB(t testing.TB) *DB {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:")
+	conn, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1040,7 +1044,7 @@ func TestGetNodesFiltering(t *testing.T) {
 	seedTestData(t, db)
 
 	t.Run("role filter", func(t *testing.T) {
-		nodes, total, _, err := db.GetNodes(50, 0, "repeater", "", "", "", "", "")
+		nodes, total, _, err := db.GetNodes(NodeQuery{Limit: 50, Role: "repeater"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1053,7 +1057,7 @@ func TestGetNodesFiltering(t *testing.T) {
 	})
 
 	t.Run("search filter", func(t *testing.T) {
-		nodes, _, _, err := db.GetNodes(50, 0, "", "Companion", "", "", "", "")
+		nodes, _, _, err := db.GetNodes(NodeQuery{Limit: 50, Search: "Companion"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1063,7 +1067,7 @@ func TestGetNodesFiltering(t *testing.T) {
 	})
 
 	t.Run("sort by name", func(t *testing.T) {
-		nodes, _, _, err := db.GetNodes(50, 0, "", "", "", "", "name", "")
+		nodes, _, _, err := db.GetNodes(NodeQuery{Limit: 50, SortBy: "name"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1073,7 +1077,7 @@ func TestGetNodesFiltering(t *testing.T) {
 	})
 
 	t.Run("sort by packetCount", func(t *testing.T) {
-		nodes, _, _, err := db.GetNodes(50, 0, "", "", "", "", "packetCount", "")
+		nodes, _, _, err := db.GetNodes(NodeQuery{Limit: 50, SortBy: "packetCount"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1083,7 +1087,7 @@ func TestGetNodesFiltering(t *testing.T) {
 	})
 
 	t.Run("sort by lastSeen", func(t *testing.T) {
-		nodes, _, _, err := db.GetNodes(50, 0, "", "", "", "", "lastSeen", "")
+		nodes, _, _, err := db.GetNodes(NodeQuery{Limit: 50, SortBy: "lastSeen"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1095,7 +1099,7 @@ func TestGetNodesFiltering(t *testing.T) {
 	t.Run("lastHeard filter 30d", func(t *testing.T) {
 		// The filter works by computing since = now - 30d; seed data last_seen may or may not match.
 		// Just verify the filter runs without error.
-		_, _, _, err := db.GetNodes(50, 0, "", "", "", "30d", "", "")
+		_, _, _, err := db.GetNodes(NodeQuery{Limit: 50, LastHeard: "30d"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1103,7 +1107,7 @@ func TestGetNodesFiltering(t *testing.T) {
 
 	t.Run("lastHeard filter various", func(t *testing.T) {
 		for _, lh := range []string{"1h", "6h", "24h", "7d", "30d", "invalid"} {
-			_, _, _, err := db.GetNodes(50, 0, "", "", "", lh, "", "")
+			_, _, _, err := db.GetNodes(NodeQuery{Limit: 50, LastHeard: lh})
 			if err != nil {
 				t.Fatalf("lastHeard=%s failed: %v", lh, err)
 			}
@@ -1111,7 +1115,7 @@ func TestGetNodesFiltering(t *testing.T) {
 	})
 
 	t.Run("default limit", func(t *testing.T) {
-		nodes, _, _, err := db.GetNodes(0, 0, "", "", "", "", "", "")
+		nodes, _, _, err := db.GetNodes(NodeQuery{Limit: 0})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1121,7 +1125,7 @@ func TestGetNodesFiltering(t *testing.T) {
 	})
 
 	t.Run("before filter", func(t *testing.T) {
-		_, total, _, err := db.GetNodes(50, 0, "", "", "2026-01-02T00:00:00Z", "", "", "")
+		_, total, _, err := db.GetNodes(NodeQuery{Limit: 50, Before: "2026-01-02T00:00:00Z"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1131,7 +1135,7 @@ func TestGetNodesFiltering(t *testing.T) {
 	})
 
 	t.Run("offset", func(t *testing.T) {
-		nodes, total, _, err := db.GetNodes(1, 1, "", "", "", "", "", "")
+		nodes, total, _, err := db.GetNodes(NodeQuery{Limit: 1, Offset: 1})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1144,7 +1148,7 @@ func TestGetNodesFiltering(t *testing.T) {
 	})
 
 	t.Run("region filter SJC", func(t *testing.T) {
-		nodes, total, _, err := db.GetNodes(50, 0, "", "", "", "", "", "SJC")
+		nodes, total, _, err := db.GetNodes(NodeQuery{Limit: 50, Region: "SJC"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1160,7 +1164,7 @@ func TestGetNodesFiltering(t *testing.T) {
 	})
 
 	t.Run("region filter SFO", func(t *testing.T) {
-		_, total, _, err := db.GetNodes(50, 0, "", "", "", "", "", "SFO")
+		_, total, _, err := db.GetNodes(NodeQuery{Limit: 50, Region: "SFO"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1170,7 +1174,7 @@ func TestGetNodesFiltering(t *testing.T) {
 	})
 
 	t.Run("region filter multi", func(t *testing.T) {
-		_, total, _, err := db.GetNodes(50, 0, "", "", "", "", "", "SJC,SFO")
+		_, total, _, err := db.GetNodes(NodeQuery{Limit: 50, Region: "SJC,SFO"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1180,7 +1184,7 @@ func TestGetNodesFiltering(t *testing.T) {
 	})
 
 	t.Run("region filter unknown", func(t *testing.T) {
-		_, total, _, err := db.GetNodes(50, 0, "", "", "", "", "", "AMS")
+		_, total, _, err := db.GetNodes(NodeQuery{Limit: 50, Region: "AMS"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1194,7 +1198,7 @@ func TestGetNodesFiltering(t *testing.T) {
 // where observations use observer_id TEXT instead of observer_idx INTEGER.
 func setupTestDBV2(t *testing.T) *DB {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:")
+	conn, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1222,7 +1226,8 @@ func setupTestDBV2(t *testing.T) *DB {
 			last_seen TEXT,
 			first_seen TEXT,
 			packet_count INTEGER DEFAULT 0,
-			last_packet_at TEXT DEFAULT NULL
+			last_packet_at TEXT DEFAULT NULL,
+			inactive INTEGER DEFAULT 0
 		);
 
 		CREATE TABLE transmissions (
@@ -1298,7 +1303,7 @@ func TestGetNodesRegionFilterV2(t *testing.T) {
 		VALUES (1, 'obs-v2-1', 'V2 Observer', 10.0, -90, '[]', ?)`, recentEpoch)
 
 	t.Run("v2 region filter match", func(t *testing.T) {
-		nodes, total, _, err := db.GetNodes(50, 0, "", "", "", "", "", "LAX")
+		nodes, total, _, err := db.GetNodes(NodeQuery{Limit: 50, Region: "LAX"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1314,7 +1319,7 @@ func TestGetNodesRegionFilterV2(t *testing.T) {
 	})
 
 	t.Run("v2 region filter no match", func(t *testing.T) {
-		_, total, _, err := db.GetNodes(50, 0, "", "", "", "", "", "JFK")
+		_, total, _, err := db.GetNodes(NodeQuery{Limit: 50, Region: "JFK"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1450,7 +1455,7 @@ func TestOpenDBValid(t *testing.T) {
 	dbPath := filepath.Join(dir, "test.db")
 
 	// Create DB with a table using a writable connection first
-	conn, err := sql.Open("sqlite", dbPath)
+	conn, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1459,6 +1464,7 @@ func TestOpenDBValid(t *testing.T) {
 		conn.Close()
 		t.Fatal(err)
 	}
+	ensurePreparable(t, conn)
 	conn.Close()
 
 	// Now test OpenDB (read-only)
@@ -1491,7 +1497,7 @@ func TestDetectSchemaScopeName(t *testing.T) {
 	dbPath := filepath.Join(dir, "detect.db")
 
 	// Create file-based DB with the scope_name and default_scope columns.
-	conn, err := sql.Open("sqlite", dbPath)
+	conn, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1508,6 +1514,7 @@ func TestDetectSchemaScopeName(t *testing.T) {
 		conn.Close()
 		t.Fatalf("create observations: %v", err)
 	}
+	ensurePreparable(t, conn)
 	conn.Close()
 
 	db, err := OpenDB(dbPath)
@@ -1525,7 +1532,7 @@ func TestDetectSchemaScopeName(t *testing.T) {
 
 	// Verify the flags stay false when the columns are absent.
 	dbPath2 := filepath.Join(dir, "detect2.db")
-	conn2, err := sql.Open("sqlite", dbPath2)
+	conn2, err := sql.Open("sqlite3", dbPath2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1533,6 +1540,7 @@ func TestDetectSchemaScopeName(t *testing.T) {
 	conn2.Exec(`CREATE TABLE transmissions (id INTEGER PRIMARY KEY, hash TEXT)`)
 	conn2.Exec(`CREATE TABLE nodes (public_key TEXT PRIMARY KEY)`)
 	conn2.Exec(`CREATE TABLE observations (id INTEGER PRIMARY KEY)`)
+	ensurePreparable(t, conn2)
 	conn2.Close()
 
 	db2, err := OpenDB(dbPath2)
@@ -1781,7 +1789,7 @@ func TestNodeTelemetryFields(t *testing.T) {
 	}
 
 	// Test via GetNodes
-	nodes, _, _, err := db.GetNodes(50, 0, "sensor", "", "", "", "", "")
+	nodes, _, _, err := db.GetNodes(NodeQuery{Limit: 50, Role: "sensor"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2229,7 +2237,7 @@ func TestPerObservationRawHexEnrich(t *testing.T) {
 }
 
 func TestGetScopeStats(t *testing.T) {
-	conn, err := sql.Open("sqlite", ":memory:")
+	conn, err := sql.Open("sqlite3", ":memory:")
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
@@ -2242,8 +2250,9 @@ func TestGetScopeStats(t *testing.T) {
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		raw_hex TEXT, hash TEXT, first_seen TEXT, route_type INTEGER,
 		payload_type INTEGER, payload_version INTEGER, decoded_json TEXT,
-		scope_name TEXT DEFAULT NULL
+		scope_name TEXT DEFAULT NULL, from_pubkey TEXT DEFAULT NULL
 	)`)
+	db.conn.Exec(`CREATE TABLE IF NOT EXISTS nodes (public_key TEXT PRIMARY KEY, role TEXT)`)
 	// Manually set hasScopeName since we bypassed the detector
 	db.hasScopeName = true
 
@@ -2280,6 +2289,115 @@ func TestGetScopeStats(t *testing.T) {
 	}
 	if len(stats.ByRegion) != 1 || stats.ByRegion[0].Name != "#belgium" || stats.ByRegion[0].Count != 1 {
 		t.Errorf("ByRegion = %+v, want [{#belgium 1}]", stats.ByRegion)
+	}
+}
+
+// TestGetScopeStatsAdvertsByRole covers the #1979 breakdown: flood adverts in
+// the window, grouped by the sender's nodes.role, split by the three
+// scope_name states (NULL is unscoped, an empty string is unknown scope, a
+// name is a named scope).
+func TestGetScopeStatsAdvertsByRole(t *testing.T) {
+	conn, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	conn.SetMaxOpenConns(1)
+	db := &DB{conn: conn, hasScopeName: true}
+	defer db.conn.Close()
+
+	for _, stmt := range []string{
+		`CREATE TABLE transmissions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			hash TEXT, first_seen TEXT, route_type INTEGER, payload_type INTEGER,
+			scope_name TEXT DEFAULT NULL, from_pubkey TEXT DEFAULT NULL
+		)`,
+		`CREATE TABLE nodes (public_key TEXT PRIMARY KEY, role TEXT)`,
+		`INSERT INTO nodes (public_key, role) VALUES ('rpt', 'repeater'), ('cmp', 'companion'), ('sns', 'sensor'), ('norole', '')`,
+	} {
+		if _, err := db.conn.Exec(stmt); err != nil {
+			t.Fatalf("schema: %v", err)
+		}
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	old := time.Now().UTC().Add(-48 * time.Hour).Format(time.RFC3339)
+	rows := []struct {
+		hash    string
+		seen    string
+		route   int
+		ptype   int
+		scope   interface{}
+		fromKey interface{}
+	}{
+		// Totals per role differ from alphabetical order so the test pins
+		// ORDER BY total: repeater 4, unknown 3, companion 2, sensor 2.
+		// companion and sensor tie, which pins the role-name tie-break.
+		// Repeater: every scope state on flood routes, two named.
+		{"r1", now, 1, 4, nil, "rpt"},
+		{"r2", now, 0, 4, "", "rpt"},
+		{"r3", now, 0, 4, "#belgium", "rpt"},
+		{"r8", now, 1, 4, "#belgium", "rpt"},
+		// Excluded: zero-hop adverts are DIRECT/TRANSPORT_DIRECT, not flood.
+		{"r4", now, 2, 4, nil, "rpt"},
+		{"r5", now, 3, 4, "#belgium", "rpt"},
+		// Excluded: not an advert.
+		{"r6", now, 0, 5, "#belgium", "rpt"},
+		// Excluded: outside the window.
+		{"r7", old, 1, 4, nil, "rpt"},
+		// Companion: one unscoped, one named.
+		{"c1", now, 1, 4, nil, "cmp"},
+		{"c3", now, 0, 4, "#belgium", "cmp"},
+		// Sensor: one unscoped, one unknown scope.
+		{"s1", now, 1, 4, nil, "sns"},
+		{"s2", now, 0, 4, "", "sns"},
+		// No node row, and a node row without a role: both "unknown".
+		{"u1", now, 1, 4, nil, "stranger"},
+		{"u2", now, 0, 4, "", "norole"},
+		{"u3", now, 0, 4, "#belgium", nil},
+	}
+	for _, r := range rows {
+		if _, err := db.conn.Exec(
+			`INSERT INTO transmissions (hash, first_seen, route_type, payload_type, scope_name, from_pubkey) VALUES (?, ?, ?, ?, ?, ?)`,
+			r.hash, r.seen, r.route, r.ptype, r.scope, r.fromKey,
+		); err != nil {
+			t.Fatalf("seed %s: %v", r.hash, err)
+		}
+	}
+
+	stats, err := db.GetScopeStats("24h")
+	if err != nil {
+		t.Fatalf("GetScopeStats: %v", err)
+	}
+	// Ordered by total adverts descending, then role name.
+	want := []ScopeAdvertRoleCount{
+		{Role: "repeater", Unscoped: 1, UnknownScope: 1, Named: 2},
+		{Role: "unknown", Unscoped: 1, UnknownScope: 1, Named: 1},
+		{Role: "companion", Unscoped: 1, UnknownScope: 0, Named: 1},
+		{Role: "sensor", Unscoped: 1, UnknownScope: 1, Named: 0},
+	}
+	if !reflect.DeepEqual(stats.AdvertsByRole, want) {
+		t.Errorf("AdvertsByRole = %+v, want %+v", stats.AdvertsByRole, want)
+	}
+}
+
+func TestGetScopeStatsAdvertsByRoleEmpty(t *testing.T) {
+	conn, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	conn.SetMaxOpenConns(1)
+	db := &DB{conn: conn, hasScopeName: true}
+	defer db.conn.Close()
+	db.conn.Exec(`CREATE TABLE transmissions (id INTEGER PRIMARY KEY, first_seen TEXT, route_type INTEGER, payload_type INTEGER, scope_name TEXT, from_pubkey TEXT)`)
+	db.conn.Exec(`CREATE TABLE nodes (public_key TEXT PRIMARY KEY, role TEXT)`)
+
+	stats, err := db.GetScopeStats("1h")
+	if err != nil {
+		t.Fatalf("GetScopeStats: %v", err)
+	}
+	// Array fields are [] when empty, never null (docs/api-spec.md conventions).
+	if stats.AdvertsByRole == nil || len(stats.AdvertsByRole) != 0 {
+		t.Errorf("AdvertsByRole = %#v, want empty non-nil slice", stats.AdvertsByRole)
 	}
 }
 
@@ -2325,5 +2443,164 @@ func TestLoadIndexesRelayHopsFromResolvedPath(t *testing.T) {
 	}
 	if store.byNode[relayPubkey][0].Hash != "relaytest0001hash" {
 		t.Errorf("relay byNode entry has wrong hash: %s", store.byNode[relayPubkey][0].Hash)
+	}
+}
+
+// failingQuerier wraps a real *sql.DB but forces the PRAGMA probe for a chosen
+// table to fail, so the #1901 fail-loud path can be exercised deterministically.
+type failingQuerier struct {
+	real   *sql.DB
+	failOn string // if the query text contains this substring, return err
+	err    error
+}
+
+func (f *failingQuerier) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	if f.failOn != "" && strings.Contains(query, f.failOn) {
+		return nil, f.err
+	}
+	return f.real.QueryContext(ctx, query, args...)
+}
+
+// TestDetectSchemaFailsLoudOnProbeError is the regression guard for #1901: a
+// probe-query failure must surface as an error so OpenDB can abort startup,
+// instead of being silently swallowed and leaving the server in v2 mode against
+// a v3 database for the whole process lifetime.
+func TestDetectSchemaFailsLoudOnProbeError(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "v3.db")
+	conn, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.SetMaxOpenConns(1)
+	// v3-shaped: observations carries observer_idx.
+	if _, err := conn.Exec(`CREATE TABLE observations (id INTEGER PRIMARY KEY, observer_idx INTEGER)`); err != nil {
+		conn.Close()
+		t.Fatal(err)
+	}
+	conn.Exec(`CREATE TABLE transmissions (id INTEGER PRIMARY KEY)`)
+	conn.Exec(`CREATE TABLE nodes (public_key TEXT PRIMARY KEY)`)
+	conn.Close()
+
+	real, err := sql.Open("sqlite3", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer real.Close()
+
+	q := &failingQuerier{real: real, failOn: "table_info(observations)", err: errors.New("injected probe failure")}
+	db := &DB{}
+	if err := db.detectSchema(context.Background(), q); err == nil {
+		t.Fatal("detectSchema must return an error when a schema probe fails (#1901)")
+	}
+	if db.isV3 {
+		t.Error("isV3 must not be set when detection failed")
+	}
+}
+
+// TestDetectSchemaV3AndV2 verifies detection sets isV3 correctly for both schema
+// shapes via the real OpenDB path, and that both open cleanly.
+func TestDetectSchemaV3AndV2(t *testing.T) {
+	dir := t.TempDir()
+
+	v3 := filepath.Join(dir, "v3.db")
+	c, err := sql.Open("sqlite3", v3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.SetMaxOpenConns(1)
+	c.Exec(`CREATE TABLE observations (id INTEGER PRIMARY KEY, observer_idx INTEGER)`)
+	c.Exec(`CREATE TABLE transmissions (id INTEGER PRIMARY KEY, hash TEXT)`)
+	c.Exec(`CREATE TABLE nodes (public_key TEXT PRIMARY KEY)`)
+	ensurePreparable(t, c)
+	c.Close()
+	db, err := OpenDB(v3)
+	if err != nil {
+		t.Fatalf("OpenDB v3: %v", err)
+	}
+	if !db.isV3 {
+		t.Error("isV3 should be true when observations.observer_idx exists")
+	}
+	db.Close()
+
+	v2 := filepath.Join(dir, "v2.db")
+	c2, err := sql.Open("sqlite3", v2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2.SetMaxOpenConns(1)
+	c2.Exec(`CREATE TABLE observations (id INTEGER PRIMARY KEY, observer_id INTEGER)`)
+	c2.Exec(`CREATE TABLE transmissions (id INTEGER PRIMARY KEY, hash TEXT)`)
+	c2.Exec(`CREATE TABLE nodes (public_key TEXT PRIMARY KEY)`)
+	ensurePreparable(t, c2)
+	c2.Close()
+	db2, err := OpenDB(v2)
+	if err != nil {
+		t.Fatalf("OpenDB v2: %v", err)
+	}
+	if db2.isV3 {
+		t.Error("isV3 should be false when observations has no observer_idx")
+	}
+	db2.Close()
+}
+
+// #1899: the sidebar preview must come from the region being filtered on.
+//
+// GetChannels scoped msg_count and last_activity through observations/observers,
+// but the sample_json subquery that feeds lastMessage/lastSender did not join
+// either table. It therefore always returned the globally newest message on the
+// channel, so an operator filtering on their own region saw a preview line from
+// a message their observers never heard.
+func TestGetChannelsPreviewRespectsRegionFilter(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obs1', 'Observer1', 'SJC')`)
+	db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES ('obs2', 'Observer2', 'SFO')`)
+
+	// One channel, seen in both regions. The SFO message is the newer one, so it
+	// is what an unscoped preview would show.
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('AA', 'hash1', '2026-01-15T10:00:00Z', 1, 5,
+		'{"type":"CHAN","channel":"#shared","text":"Alice: heard in SJC","sender":"Alice"}', '#shared')`)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, timestamp)
+		VALUES (1, 1, 12.0, -90, 1736935200)`)
+
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash)
+		VALUES ('BB', 'hash2', '2026-01-15T10:05:00Z', 1, 5,
+		'{"type":"CHAN","channel":"#shared","text":"Bob: heard in SFO","sender":"Bob"}', '#shared')`)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, timestamp)
+		VALUES (2, 2, 14.0, -88, 1736935500)`)
+
+	sjc, err := db.GetChannels("SJC")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sjc) != 1 {
+		t.Fatalf("expected 1 channel for SJC, got %d", len(sjc))
+	}
+	if got := sjc[0]["lastSender"]; got != "Alice" {
+		t.Errorf("preview sender = %v, want Alice: SJC must not be shown Bob's message, "+
+			"which only SFO heard", got)
+	}
+	if got := sjc[0]["lastMessage"]; got != "heard in SJC" {
+		t.Errorf("preview message = %v, want \"heard in SJC\"", got)
+	}
+
+	// The other direction, so the test cannot pass by always picking the oldest.
+	sfo, err := db.GetChannels("SFO")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sfo[0]["lastSender"]; got != "Bob" {
+		t.Errorf("preview sender = %v, want Bob for SFO", got)
+	}
+
+	// Unscoped still shows the globally newest, which was never in question.
+	all, err := db.GetChannels()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := all[0]["lastSender"]; got != "Bob" {
+		t.Errorf("unfiltered preview sender = %v, want Bob (the newest message)", got)
 	}
 }

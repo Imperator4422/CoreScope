@@ -43,6 +43,9 @@ func Apply(rw *sql.DB, logf Logger) error {
 	if err := ensureServerIndexes(rw); err != nil {
 		return fmt.Errorf("ensure server indexes: %w", err)
 	}
+	if err := ensureObservationsDedupIndex(rw, logf); err != nil {
+		return fmt.Errorf("ensure observations dedup index: %w", err)
+	}
 	if err := ensureNeighborEdgesTable(rw); err != nil {
 		return fmt.Errorf("ensure neighbor_edges: %w", err)
 	}
@@ -61,6 +64,11 @@ func Apply(rw *sql.DB, logf Logger) error {
 	if err := ensureObserverIATAColumn(rw, logf); err != nil {
 		return fmt.Errorf("ensure observers.iata: %w", err)
 	}
+	// Must run after ensureObserverIATAColumn: the expression index below
+	// is on observers.iata, which that step guarantees exists.
+	if err := ensureChannelIndexes(rw); err != nil {
+		return fmt.Errorf("ensure channel indexes: %w", err)
+	}
 	if err := ensureForeignAdvertColumn(rw, logf); err != nil {
 		return fmt.Errorf("ensure foreign_advert: %w", err)
 	}
@@ -72,6 +80,9 @@ func Apply(rw *sql.DB, logf Logger) error {
 	}
 	if err := ensureDefaultScopeColumns(rw, logf); err != nil {
 		return fmt.Errorf("ensure default_scope: %w", err)
+	}
+	if err := ensureConfiguredScopeColumns(rw, logf); err != nil {
+		return fmt.Errorf("ensure configured_scope: %w", err)
 	}
 	if err := ensureObservationsRawHexColumn(rw, logf); err != nil {
 		return fmt.Errorf("ensure observations.raw_hex: %w", err)
@@ -97,6 +108,12 @@ func Apply(rw *sql.DB, logf Logger) error {
 	if err := ensureTransmissionsLastSeenColumn(rw, logf); err != nil {
 		return fmt.Errorf("ensure transmissions.last_seen: %w", err)
 	}
+	if err := ensureAdvertEvidence(rw); err != nil {
+		return fmt.Errorf("ensure advert route evidence: %w", err)
+	}
+	// Advert evidence is intentionally not required by AssertReady: a legacy
+	// read-only server reports unknown until this table/backfill is available,
+	// and re-probes absence instead of caching the startup race permanently.
 	return nil
 }
 
@@ -144,6 +161,9 @@ func AssertReady(ro *sql.DB) error {
 	mustCol("transmissions", "scope_name")
 	mustCol("nodes", "default_scope")
 	mustCol("inactive_nodes", "default_scope")
+	// #1865: confirmed region scopes from the observer /neighbors report.
+	mustCol("nodes", "configured_scope")
+	mustCol("inactive_nodes", "configured_scope")
 	mustCol("observations", "raw_hex")
 	// Multi-byte capability cache (#1324 follow-up; PR #903 surface).
 	// Owned by ingestor — server reads these for O(1) /api/nodes
@@ -178,9 +198,27 @@ func AssertReady(ro *sql.DB) error {
 	return nil
 }
 
+// Querier is the read surface shared by *sql.DB and *sql.Tx.
+//
+// Not *sql.Conn: it exposes only QueryContext/QueryRowContext, so it does not
+// satisfy this. Widen the interface to the Context variants if a caller ever
+// needs one.
+//
+// It exists so schema probes can run on whichever handle the caller already
+// holds. Taking *sql.DB unconditionally is a deadlock waiting to happen: a
+// caller inside a transaction has the connection checked out, and on a pool
+// capped at one connection — which is what cmd/ingestor runs — a probe against
+// the pool waits forever for the connection its own transaction is holding.
+type Querier interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
 // TableHasColumn reports whether the given table has the given column.
 // Exported because tests and the read-side need it without re-implementing.
-func TableHasColumn(db *sql.DB, table, column string) (bool, error) {
+//
+// Pass the transaction, not the pool, when you are inside one. See Querier.
+func TableHasColumn(db Querier, table, column string) (bool, error) {
 	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
 	if err != nil {
 		return false, err
@@ -239,6 +277,41 @@ func ensureServerIndexes(rw *sql.DB) error {
 		if _, err := rw.Exec(`CREATE INDEX IF NOT EXISTS idx_observations_observer_id ON observations(observer_id)`); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// ensureChannelIndexes speeds up /api/channels and
+// /api/channels/{hash}/messages.
+//
+//   - idx_transmissions_channel_hash_payload adds first_seen to the
+//     existing channel_hash index (cmd/ingestor/db.go migration
+//     'channel_hash_v1', idx_tx_channel_hash) so GetChannels' "latest
+//     message" correlated subquery (channel_hash + payload_type, ORDER BY
+//     first_seen DESC LIMIT 1) and GetChannelMessages' count/page queries
+//     resolve as index-order scans instead of sorting per channel.
+//   - idx_observers_iata_norm indexes the UPPER(TRIM(iata)) expression
+//     that GetChannels/GetEncryptedChannels/GetChannelMessages use for
+//     region filtering; a plain index on iata can't be used under that
+//     expression, so the expression itself is indexed.
+//
+// transmissions.channel_hash itself is added by the ingestor's legacy
+// 'channel_hash_v1' migration (cmd/ingestor/db.go), not by this package,
+// so it isn't guaranteed to exist yet on every DB Apply runs against —
+// probe before indexing, same pattern as the observer_idx/observer_id
+// probe in ensureServerIndexes above.
+func ensureChannelIndexes(rw *sql.DB) error {
+	hasChannelHash, err := TableHasColumn(rw, "transmissions", "channel_hash")
+	if err != nil {
+		return err
+	}
+	if hasChannelHash {
+		if _, err := rw.Exec(`CREATE INDEX IF NOT EXISTS idx_transmissions_channel_hash_payload ON transmissions(channel_hash, payload_type, first_seen)`); err != nil {
+			return fmt.Errorf("ensure idx_transmissions_channel_hash_payload: %w", err)
+		}
+	}
+	if _, err := rw.Exec(`CREATE INDEX IF NOT EXISTS idx_observers_iata_norm ON observers(UPPER(TRIM(iata)))`); err != nil {
+		return fmt.Errorf("ensure idx_observers_iata_norm: %w", err)
 	}
 	return nil
 }
@@ -425,6 +498,39 @@ func ensureDefaultScopeColumns(rw *sql.DB, logf Logger) error {
 	}
 	if _, err := rw.Exec(`INSERT OR IGNORE INTO _migrations (name) VALUES ('nodes_default_scope_v1')`); err != nil {
 		return fmt.Errorf("record nodes_default_scope_v1: %w", err)
+	}
+	return nil
+}
+
+// ensureConfiguredScopeColumns adds nodes.configured_scope +
+// nodes.configured_scope_at (and mirrors on inactive_nodes) for #1865.
+// Unlike default_scope (inferred from observed advert transport scope, and
+// overwritten on every observation), configured_scope holds the region scopes
+// a node has CONFIGURED, taken as concrete evidence from the observer
+// /neighbors report — written only for the observer's own `self` scopes and
+// for neighbors whose OTA scope query returned status="responded". The
+// server PRAGMA-detects configured_scope as hasConfiguredScope.
+func ensureConfiguredScopeColumns(rw *sql.DB, logf Logger) error {
+	if err := ensureMigrationsTable(rw); err != nil {
+		return err
+	}
+	for _, table := range []string{"nodes", "inactive_nodes"} {
+		for _, col := range []string{"configured_scope", "configured_scope_at"} {
+			has, err := TableHasColumn(rw, table, col)
+			if err != nil {
+				return fmt.Errorf("inspect %s.%s: %w", table, col, err)
+			}
+			if has {
+				continue
+			}
+			if _, err := rw.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s TEXT DEFAULT NULL`, table, col)); err != nil {
+				return fmt.Errorf("alter %s add %s: %w", table, col, err)
+			}
+			logf("[dbschema] added %s column to %s (#1865)", col, table)
+		}
+	}
+	if _, err := rw.Exec(`INSERT OR IGNORE INTO _migrations (name) VALUES ('nodes_configured_scope_v1')`); err != nil {
+		return fmt.Errorf("record nodes_configured_scope_v1: %w", err)
 	}
 	return nil
 }
